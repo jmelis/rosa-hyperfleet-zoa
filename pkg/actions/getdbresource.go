@@ -11,8 +11,27 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// tombstoneFilter excludes fully-deleted rows (deletion_timestamp set with no
+// finalizers) while keeping live and dying objects. It matches the
+// hyperfleet-operator's own List query (hyperfleet-db/internal/reader/list.go).
+const tombstoneFilter = `(deletion_timestamp IS NULL OR metadata->'finalizers' != '[]'::jsonb)`
+
 func init() {
 	Register(&getDBResource{})
+}
+
+// validateDBConnParams checks the prerequisites shared by all hyperfleet-db
+// actions: an AWS config (for the IAM auth token) and the DB connection env vars.
+func validateDBConnParams(params *ExecutionParams) error {
+	if params.AWSConfig == nil {
+		return fmt.Errorf("AWS configuration is required")
+	}
+	for _, envVar := range []string{"HYPERFLEET_DB_ENDPOINT", "HYPERFLEET_DB_NAME", "HYPERFLEET_DB_USERNAME"} {
+		if os.Getenv(envVar) == "" {
+			return fmt.Errorf("environment variable %s is not set", envVar)
+		}
+	}
+	return nil
 }
 
 type getDBResource struct{}
@@ -38,16 +57,8 @@ func (a *getDBResource) Metadata() ActionMetadata {
 }
 
 func (a *getDBResource) Validate(_ context.Context, params *ExecutionParams) error {
-	if params.AWSConfig == nil {
-		return fmt.Errorf("AWS configuration is required")
-	}
-
-	// Check that required env vars are set
-	requiredEnvVars := []string{"HYPERFLEET_DB_ENDPOINT", "HYPERFLEET_DB_NAME", "HYPERFLEET_DB_USERNAME"}
-	for _, envVar := range requiredEnvVars {
-		if os.Getenv(envVar) == "" {
-			return fmt.Errorf("environment variable %s is not set", envVar)
-		}
+	if err := validateDBConnParams(params); err != nil {
+		return err
 	}
 
 	gvk := strings.TrimSpace(params.Params["gvk"])
@@ -192,7 +203,7 @@ func buildListQuery(gvk, namespace, name string, allNamespaces bool) (string, []
 		`deletion_timestamp::text, created_at::text, updated_at::text ` +
 		`FROM kubernetes_resources ` +
 		`WHERE gvk = $1 ` +
-		`AND (deletion_timestamp IS NULL OR metadata->'finalizers' != '[]'::jsonb)`)
+		`AND ` + tombstoneFilter)
 	args := []any{gvk}
 
 	if !allNamespaces && namespace != "" {
