@@ -66,17 +66,24 @@ func (a *getDBResource) Execute(ctx context.Context, params *ExecutionParams) (*
 
 	params.Logger.Info("generated IAM auth token successfully")
 
-	// Build PostgreSQL connection string
-	// Format: postgres://username:password@host:port/database?options
-	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=require",
+	// Build the connection config from a DSN WITHOUT the token, then set the
+	// password field verbatim. The RDS IAM auth token is a presigned URL
+	// containing reserved characters (/, ?, &, =, %), so interpolating it into
+	// a postgres://user:password@host URL corrupts it — the parser truncates
+	// the password at the first '/'. Setting Password directly avoids any
+	// URL-encoding pitfalls.
+	connConfig, err := pgx.ParseConfig(fmt.Sprintf("postgres://%s@%s/%s?sslmode=require",
 		username,
-		authToken,
 		endpoint,
 		dbName,
-	)
+	))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse database config: %w", err)
+	}
+	connConfig.Password = authToken
 
 	// Connect to the database
-	conn, err := pgx.Connect(ctx, dsn)
+	conn, err := pgx.ConnectConfig(ctx, connConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
