@@ -52,6 +52,7 @@ func (a *getDBResource) Metadata() ActionMetadata {
 			{Name: "namespace", Description: "Target namespace (omit with all_namespaces, or for cluster-scoped resources)"},
 			{Name: "all_namespaces", Default: "false", Description: "List across all namespaces (ignores namespace)"},
 			{Name: "name", Description: "Get a specific resource by name"},
+			{Name: "verbose", Default: "false", Description: "Return full objects (spec/status/metadata) instead of the summary table"},
 		},
 	}
 }
@@ -78,6 +79,7 @@ func (a *getDBResource) Execute(ctx context.Context, params *ExecutionParams) (*
 	namespace := params.Params["namespace"]
 	name := params.Params["name"]
 	allNamespaces := params.Params["all_namespaces"] == "true"
+	verbose := params.Params["verbose"] == "true"
 
 	conn, err := connectHyperfleetDB(ctx, params)
 	if err != nil {
@@ -92,44 +94,29 @@ func (a *getDBResource) Execute(ctx context.Context, params *ExecutionParams) (*
 		"namespace", namespace,
 		"name", name,
 		"all_namespaces", allNamespaces,
+		"verbose", verbose,
 	)
 
-	rows, err := conn.Query(ctx, query, args...)
+	pgRows, err := conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query resources: %w", err)
 	}
-	defer rows.Close()
+	defer pgRows.Close()
 
-	items := make([]map[string]interface{}, 0)
-	for rows.Next() {
-		var (
-			gvkVal, ns, nm, uid         string
-			objectVersion               int64
-			specRaw, statusRaw, metaRaw []byte
-			delTS, createdAt, updatedAt *string
-		)
-		if err := rows.Scan(
-			&gvkVal, &ns, &nm, &uid, &objectVersion,
-			&specRaw, &statusRaw, &metaRaw,
-			&delTS, &createdAt, &updatedAt,
+	scanned := make([]dbResource, 0)
+	for pgRows.Next() {
+		var r dbResource
+		if err := pgRows.Scan(
+			&r.gvk, &r.namespace, &r.name, &r.uid, &r.objectVersion,
+			&r.spec, &r.status, &r.metadata,
+			&r.deletionTimestamp, &r.createdAt, &r.updatedAt,
+			&r.ageSeconds,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan resource row: %w", err)
 		}
-		items = append(items, map[string]interface{}{
-			"gvk":               gvkVal,
-			"namespace":         ns,
-			"name":              nm,
-			"uid":               uid,
-			"objectVersion":     objectVersion,
-			"metadata":          decodeJSONB(metaRaw),
-			"spec":              decodeJSONB(specRaw),
-			"status":            decodeJSONB(statusRaw),
-			"deletionTimestamp": delTS,
-			"createdAt":         createdAt,
-			"updatedAt":         updatedAt,
-		})
+		scanned = append(scanned, r)
 	}
-	if err := rows.Err(); err != nil {
+	if err := pgRows.Err(); err != nil {
 		return nil, fmt.Errorf("failed reading resource rows: %w", err)
 	}
 
@@ -138,25 +125,48 @@ func (a *getDBResource) Execute(ctx context.Context, params *ExecutionParams) (*
 		scope = "all namespaces"
 	}
 
-	// A specific name lookup returns the single object (or a not-found error),
+	// A specific name lookup returns the single resource (or a not-found error),
 	// mirroring `kubectl get <kind> <name>`.
 	if name != "" {
-		if len(items) == 0 {
+		if len(scanned) == 0 {
 			return nil, fmt.Errorf("%s %q not found in %s", gvk, name, scope)
 		}
-		if len(items) == 1 {
+		if len(scanned) == 1 {
+			var out interface{}
+			if verbose {
+				out = scanned[0].fullObject()
+			} else {
+				out = scanned[0].summaryRow()
+			}
 			return &ActionResult{
 				Success: true,
-				Output:  items[0],
+				Output:  out,
 				Summary: fmt.Sprintf("Retrieved %s %s", gvk, name),
 			}, nil
 		}
 	}
 
+	// Default output is a flat summary row per resource, which the CLI renders as
+	// a kubectl-style table. Verbose returns the full objects for -o json / -v.
+	var output interface{}
+	if verbose {
+		items := make([]map[string]interface{}, len(scanned))
+		for i := range scanned {
+			items[i] = scanned[i].fullObject()
+		}
+		output = items
+	} else {
+		items := make([]dbResourceRow, len(scanned))
+		for i := range scanned {
+			items[i] = scanned[i].summaryRow()
+		}
+		output = items
+	}
+
 	return &ActionResult{
 		Success: true,
-		Output:  items,
-		Summary: fmt.Sprintf("Found %d %s in %s", len(items), gvk, scope),
+		Output:  output,
+		Summary: fmt.Sprintf("Found %d %s in %s", len(scanned), gvk, scope),
 	}, nil
 }
 
@@ -200,7 +210,8 @@ func buildListQuery(gvk, namespace, name string, allNamespaces bool) (string, []
 	var qb strings.Builder
 	qb.WriteString(`SELECT gvk, namespace, name, uid::text, object_version, ` +
 		`spec, status, metadata, ` +
-		`deletion_timestamp::text, created_at::text, updated_at::text ` +
+		`deletion_timestamp::text, created_at::text, updated_at::text, ` +
+		`EXTRACT(EPOCH FROM (now() - created_at))::bigint AS age_seconds ` +
 		`FROM kubernetes_resources ` +
 		`WHERE gvk = $1 ` +
 		`AND ` + tombstoneFilter)
@@ -227,6 +238,79 @@ func validateGVK(gvk string) error {
 		return fmt.Errorf("invalid gvk %q: expected Group/Version/Kind (e.g. apps/v1/Deployment or /v1/Pod)", gvk)
 	}
 	return nil
+}
+
+// dbResource holds one scanned row from kubernetes_resources. It is projected
+// into either a summary row (default, table output) or a full object (verbose).
+type dbResource struct {
+	gvk, namespace, name, uid string
+	objectVersion             int64
+	spec, status, metadata    []byte
+	deletionTimestamp         *string
+	createdAt, updatedAt      *string
+	ageSeconds                *int64
+}
+
+// dbResourceRow is the flat, scalar-only summary the CLI renders as a
+// kubectl-style table. Struct field order (not map key order) sets the columns.
+type dbResourceRow struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Version   int64  `json:"version"`
+	Age       string `json:"age"`
+	State     string `json:"state"`
+}
+
+func (r dbResource) summaryRow() dbResourceRow {
+	state := "Active"
+	if r.deletionTimestamp != nil {
+		state = "Terminating"
+	}
+	return dbResourceRow{
+		Namespace: r.namespace,
+		Name:      r.name,
+		Version:   r.objectVersion,
+		Age:       formatAge(r.ageSeconds),
+		State:     state,
+	}
+}
+
+func (r dbResource) fullObject() map[string]interface{} {
+	return map[string]interface{}{
+		"gvk":               r.gvk,
+		"namespace":         r.namespace,
+		"name":              r.name,
+		"uid":               r.uid,
+		"objectVersion":     r.objectVersion,
+		"metadata":          decodeJSONB(r.metadata),
+		"spec":              decodeJSONB(r.spec),
+		"status":            decodeJSONB(r.status),
+		"deletionTimestamp": r.deletionTimestamp,
+		"createdAt":         r.createdAt,
+		"updatedAt":         r.updatedAt,
+	}
+}
+
+// formatAge renders an age in seconds as a compact kubectl-style string
+// (e.g. 45s, 12m, 5h, 9d). Returns "-" when the age is unknown.
+func formatAge(seconds *int64) string {
+	if seconds == nil {
+		return "-"
+	}
+	s := *seconds
+	if s < 0 {
+		s = 0
+	}
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm", s/60)
+	case s < 86400:
+		return fmt.Sprintf("%dh", s/3600)
+	default:
+		return fmt.Sprintf("%dd", s/86400)
+	}
 }
 
 // decodeJSONB unmarshals a JSONB column into a generic value so it serializes as

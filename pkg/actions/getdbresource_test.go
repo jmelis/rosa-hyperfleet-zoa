@@ -137,6 +137,51 @@ func TestBuildListQuery_WhenNameWithoutNamespace_ItShouldFilterByNameOnly(t *tes
 	}
 }
 
+func TestSummaryRow_WhenLive_ItShouldBeFlatAndActive(t *testing.T) {
+	age := int64(3 * 86400)
+	r := dbResource{namespace: "clusters", name: "web", objectVersion: 7, ageSeconds: &age}
+
+	row := r.summaryRow()
+	if row.Namespace != "clusters" || row.Name != "web" || row.Version != 7 {
+		t.Errorf("unexpected identity fields: %+v", row)
+	}
+	if row.Age != "3d" {
+		t.Errorf("expected age 3d, got %q", row.Age)
+	}
+	if row.State != "Active" {
+		t.Errorf("expected state Active, got %q", row.State)
+	}
+}
+
+func TestSummaryRow_WhenDeletionTimestampSet_ItShouldBeTerminating(t *testing.T) {
+	ts := "2026-09-29 00:00:00+00"
+	r := dbResource{namespace: "clusters", name: "web", deletionTimestamp: &ts}
+
+	if got := r.summaryRow().State; got != "Terminating" {
+		t.Errorf("expected state Terminating, got %q", got)
+	}
+}
+
+func TestFormatAge(t *testing.T) {
+	sec := func(n int64) *int64 { return &n }
+	cases := map[string]struct {
+		in   *int64
+		want string
+	}{
+		"nil":                 {nil, "-"},
+		"seconds":             {sec(45), "45s"},
+		"minutes":             {sec(12 * 60), "12m"},
+		"hours":               {sec(5 * 3600), "5h"},
+		"days":                {sec(9 * 86400), "9d"},
+		"negative clock skew": {sec(-10), "0s"},
+	}
+	for name, tc := range cases {
+		if got := formatAge(tc.in); got != tc.want {
+			t.Errorf("%s: formatAge = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
 func TestDecodeJSONB_WhenValidObject_ItShouldReturnMap(t *testing.T) {
 	v := decodeJSONB([]byte(`{"replicas":3}`))
 	m, ok := v.(map[string]interface{})
