@@ -130,6 +130,40 @@ zoa audit --since 7d --target my-cluster
 zoa audit --since 2026-08-01 --until 2026-08-15
 ```
 
+## HyperFleet DB actions
+
+`get_db_resource` and `list_db_gvks` read HyperFleet control-plane resources directly from the hyperfleet-db (Aurora PostgreSQL), bypassing the Kubernetes API. They run on the RC ZOA and authenticate to the database with an RDS IAM token. Resources are keyed by GVK (`Group/Version/Kind`); the core group has an empty group, so its GVKs start with a leading slash (e.g. `/v1/ConfigMap`).
+
+```bash
+# Discover which resource types exist (with object counts). Run this first.
+zoa run list_db_gvks --jira ROSAENG-1234
+
+# List all objects of a type across every namespace
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=hypershift.openshift.io/v1beta1/HostedCluster -A
+
+# List a type within a namespace
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=apps/v1/Deployment -n clusters-mycluster
+
+# Get a namespaced resource by name (returns the single object)
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=hypershift.openshift.io/v1beta1/HostedCluster -n clusters --name my-hosted-cluster
+
+# Get a cluster-scoped resource by name (no namespace)
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=hypershift.openshift.io/v1beta1/ManagementCluster --name mc-01
+
+# Core-group resource (leading slash for the empty group)
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=/v1/ConfigMap -n kube-system
+
+# Full JSON objects (spec/status/metadata) instead of the compact summary
+zoa run get_db_resource --jira ROSAENG-1234 --param gvk=apps/v1/Deployment -n clusters-mycluster -v
+```
+
+**Notes:**
+
+- Run `list_db_gvks` first. A Kind that is not present in the DB returns an empty result rather than an error, so it doubles as a way to confirm the exact GVK string.
+- With no `--name`, the action lists; with `--name`, it returns the single matching object or a not-found error (mirrors `kubectl get <kind> <name>`).
+- Omitting `-n`/`-A` lists across all namespaces. Most HyperFleet resources are cluster-scoped (stored with an empty namespace), so this is usually what you want.
+- Fully-deleted objects are always excluded; objects still holding finalizers (mid-deletion) are shown, matching the operator's own view.
+
 ## Global Flags
 
 | Flag | Short | Env Var | Description |
