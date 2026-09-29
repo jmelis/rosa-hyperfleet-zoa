@@ -2,6 +2,7 @@ package actions
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -159,6 +160,65 @@ func TestSummaryRow_WhenDeletionTimestampSet_ItShouldBeTerminating(t *testing.T)
 
 	if got := r.summaryRow().State; got != "Terminating" {
 		t.Errorf("expected state Terminating, got %q", got)
+	}
+}
+
+// TestDBResourceRow_JSONFieldOrder pins the serialized field order of the
+// summary row. The CLI renders a JSON array of flat objects as a table whose
+// columns follow serialization order, so this order IS the column order
+// (NAMESPACE, NAME, VERSION, AGE, STATE). Using a struct (not a map) is what
+// makes it stable; this test fails loudly if the fields are ever reordered.
+func TestDBResourceRow_JSONFieldOrder_ItShouldControlColumnOrder(t *testing.T) {
+	b, err := json.Marshal(dbResourceRow{Namespace: "ns", Name: "n", Version: 1, Age: "5m", State: "Active"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"namespace":"ns","name":"n","version":1,"age":"5m","state":"Active"}`
+	if got := string(b); got != want {
+		t.Errorf("summary row field order drifted (breaks table columns):\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestFullObject checks the verbose projection: identity scalars carried
+// verbatim, JSONB columns decoded into nested structures (not raw strings), and
+// timestamps passed through as scanned.
+func TestFullObject_ItShouldNestDecodedJSONBAndCarryIdentity(t *testing.T) {
+	ts := "2026-09-29 00:00:00+00"
+	r := dbResource{
+		gvk:               "hyperfleet.io/v1alpha1/Cluster",
+		namespace:         "cluster-abc",
+		name:              "web",
+		uid:               "uid-123",
+		objectVersion:     42,
+		spec:              []byte(`{"replicas":3}`),
+		status:            []byte(`{"phase":"Ready"}`),
+		metadata:          []byte(`{"labels":{"team":"a"}}`),
+		deletionTimestamp: &ts,
+		createdAt:         &ts,
+		updatedAt:         &ts,
+	}
+
+	obj := r.fullObject()
+
+	if obj["gvk"] != "hyperfleet.io/v1alpha1/Cluster" || obj["namespace"] != "cluster-abc" ||
+		obj["name"] != "web" || obj["uid"] != "uid-123" || obj["objectVersion"] != int64(42) {
+		t.Errorf("unexpected identity fields: %+v", obj)
+	}
+
+	spec, ok := obj["spec"].(map[string]interface{})
+	if !ok || spec["replicas"] != float64(3) {
+		t.Errorf("expected spec decoded to map with replicas=3, got %T %v", obj["spec"], obj["spec"])
+	}
+	status, ok := obj["status"].(map[string]interface{})
+	if !ok || status["phase"] != "Ready" {
+		t.Errorf("expected status decoded to map with phase=Ready, got %v", obj["status"])
+	}
+	if _, ok := obj["metadata"].(map[string]interface{}); !ok {
+		t.Errorf("expected metadata decoded to map, got %T", obj["metadata"])
+	}
+
+	if got, _ := obj["deletionTimestamp"].(*string); got == nil || *got != ts {
+		t.Errorf("expected deletionTimestamp %q passed through, got %v", ts, obj["deletionTimestamp"])
 	}
 }
 
