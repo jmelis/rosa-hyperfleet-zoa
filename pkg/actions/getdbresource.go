@@ -48,7 +48,7 @@ func (a *getDBResource) Metadata() ActionMetadata {
 		DeploymentTargets: []string{DeploymentTargetRC},
 		TimeoutSeconds:    30,
 		Parameters: []ParameterDef{
-			{Name: "gvk", Required: true, Description: "Group/Version/Kind, e.g. hypershift.openshift.io/v1beta1/HostedCluster (core group: /v1/ConfigMap)"},
+			{Name: "gvk", Required: true, Description: "Group/Version/Kind, e.g. hyperfleet.io/v1alpha1/Cluster (core group: /v1/ConfigMap). Run list_db_gvks to discover valid values."},
 			{Name: "namespace", Description: "Target namespace (omit with all_namespaces, or for cluster-scoped resources)"},
 			{Name: "all_namespaces", Default: "false", Description: "List across all namespaces (ignores namespace)"},
 			{Name: "name", Description: "Get a specific resource by name"},
@@ -235,7 +235,7 @@ func buildListQuery(gvk, namespace, name string, allNamespaces bool) (string, []
 func validateGVK(gvk string) error {
 	parts := strings.Split(gvk, "/")
 	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
-		return fmt.Errorf("invalid gvk %q: expected Group/Version/Kind (e.g. apps/v1/Deployment or /v1/Pod)", gvk)
+		return fmt.Errorf("invalid gvk %q: expected Group/Version/Kind (e.g. hyperfleet.io/v1alpha1/Cluster or /v1/ConfigMap)", gvk)
 	}
 	return nil
 }
