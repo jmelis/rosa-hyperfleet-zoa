@@ -93,14 +93,25 @@ The recommended approach is to push your changes to a branch and let Tekton buil
 cd rosa-hyperfleet-zoa
 git push origin HEAD:feat/my-feature   # or push to main
 
-# 2. Open a PR on GitHub (draft is fine)
-# Tekton will build: quay.io/redhat-user-workloads/rosa-tenant/zoa-lambda:on-pr-<commit>
-# Wait for the build check to pass in the PR
+# 2. Open a PR on GitHub in normal mode (NOT draft) with hold label
+# Use --label to prevent accidental merges during testing
+gh pr create \
+  --title "feat: your feature description" \
+  --body "Description of changes..." \
+  --label "do-not-merge/hold" \
+  --base main
 
-# 3. Get your commit SHA
+# 3. Trigger the Konflux build (required when pushing from a fork)
+# Add this comment to the PR to start the build
+gh pr comment <pr-number> --body "/ok-to-test"
+
+# 4. Wait for the build check to pass in the PR
+# Tekton will build: quay.io/redhat-user-workloads/rosa-tenant/zoa-lambda:on-pr-<commit>
+
+# 5. Get your commit SHA
 git rev-parse --short HEAD   # e.g. 1fa64b3
 
-# 4. Configure ephemeral override in rosa-hyperfleet
+# 6. Configure ephemeral override in rosa-hyperfleet
 cd ../rosa-hyperfleet
 mkdir -p .ephemeral-env
 
@@ -119,10 +130,10 @@ provision_mcs:
   mc01: {}
 EOF
 
-# 5. Resync the ephemeral to deploy the new Lambda
+# 7. Resync the ephemeral to deploy the new Lambda
 make ephemeral-resync ID=<your-env-id>
 
-# 6. Run e2e tests (picks up your code changes via the new Lambda)
+# 8. Run e2e tests (picks up your code changes via the new Lambda)
 make ephemeral-zoa-e2e ID=<your-env-id> \
   ZOA_REF=feat/my-feature \
   ZOA_REPO=https://github.com/openshift-online/rosa-hyperfleet-zoa.git
@@ -169,9 +180,11 @@ need the tests to use your branch (via `ZOA_REF`).
 **Notes:**
 - The `.ephemeral-env/` directory is gitignored and only affects your local machine
 - PR images expire after 5 days (sufficient for testing)
-- PR images are built automatically by Tekton on every push (even for draft PRs)
+- **Do not create draft PRs** - Konflux builds may not trigger for drafts; use `do-not-merge/hold` label instead
+- When pushing from a fork, you must add `/ok-to-test` comment to trigger builds
 - If you need to iterate quickly on uncommitted changes, use the manual build approach
 - Remember to remove or update `.ephemeral-env/defaults.yaml` after testing to avoid using stale images
+- Remove the `do-not-merge/hold` label when ready to merge
 
 ### When is image management automatic?
 
