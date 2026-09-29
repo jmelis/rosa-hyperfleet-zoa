@@ -116,6 +116,8 @@ cd ../rosa-hyperfleet
 mkdir -p .ephemeral-env
 
 # Create override config pointing to your PR images
+# Note: If testing sync actions only, you can omit zoa_runner_* overrides
+# The runner image is only needed for async actions
 cat > .ephemeral-env/defaults.yaml <<EOF
 regional_cluster:
   zoa_lambda_image_tag: "on-pr-1fa64b3"
@@ -123,6 +125,13 @@ regional_cluster:
   zoa_lambda_source_image: "quay.io/redhat-user-workloads/rosa-tenant/zoa-lambda"
   zoa_runner_source_image: "quay.io/redhat-user-workloads/rosa-tenant/zoa-runner"
 EOF
+
+# Alternative: Override only Lambda image (if runner build is still pending)
+# cat > .ephemeral-env/defaults.yaml <<EOF
+# regional_cluster:
+#   zoa_lambda_image_tag: "on-pr-1fa64b3"
+#   zoa_lambda_source_image: "quay.io/redhat-user-workloads/rosa-tenant/zoa-lambda"
+# EOF
 
 # Create region file (required for .ephemeral-env/)
 cat > .ephemeral-env/us-east-1.yaml <<EOF
@@ -182,6 +191,8 @@ need the tests to use your branch (via `ZOA_REF`).
 - PR images expire after 5 days (sufficient for testing)
 - **Do not create draft PRs** - Konflux builds may not trigger for drafts; use `do-not-merge/hold` label instead
 - When pushing from a fork, you must add `/ok-to-test` comment to trigger builds
+- **Lambda vs Runner builds**: If testing sync actions, you only need the Lambda image (runner builds can be skipped or left at default). Runner is only needed for async actions.
+- Konflux builds Lambda and Runner in parallel, but Lambda usually finishes first - you can start testing sync actions immediately
 - If you need to iterate quickly on uncommitted changes, use the manual build approach
 - Remember to remove or update `.ephemeral-env/defaults.yaml` after testing to avoid using stale images
 - Remove the `do-not-merge/hold` label when ready to merge
